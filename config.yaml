@@ -1,0 +1,26 @@
+# Конфигурация обработки данных
+processing:
+  crumb_size: 2                   # 1 < Размер Crumb в байтах
+  chunk_power: 65536              # 2^crumb_size*8 < Размер Chunk < Вычислительные возможности
+  counter_value: 1024             # 2*2^ crumb_size < counter_value < 2^32. Порог сброса счетчиков делением на 2
+  predict_increment: 2            # Шаг инкремента в пределах actualization_value при совпадении значений счетчика и Crumb
+  actualization_value: 0.99       # Доля от размера chunk_power при сортировании значений индексов от большего к меньщему,  (0 < x < 1)
+  increment: 3                    # Основной шаг инкремента при совпадении значения счетчика и и значения Crumb
+  initial_counters: 65536
+
+radio:
+  stations:
+    - url: "http://stream.laut.fm/jazz"
+      buffer_size: 65536
+    - url: "http://stream.radioparadise.com/flac"
+      buffer_size: 65536
+    - url: "http://airspectrum.cdnstream1.com:8018/1606_192"
+      buffer_size: 65536
+    - url: "http://demo.azuracast.com/radio/8000/radio.mp3"
+      buffer_size: 65536
+  default_buffer: 65536
+  reconnect_timeout: 30s
+
+logging:
+  level: debug
+  level: info
