@@ -1,59 +1,12 @@
 # Ze Project
 
 ## 🚀 Запуск:
-go run main.go f <filename>                       # обработка файла
-go run main.go r                                  # генерация случайных данных
-go run main.go radio                              # потоковая передача с радиостанций (с автоматическим переключением при ошибках)
-python3 visualisation/simple_visualization.py     # визуализация при остановленном процессе
+- go run main.go f <filename>                       # обработка файла
+- go run main.go r                                  # генерация случайных данных
+- go run main.go radio                              # потоковая передача с радиостанций (с автоматическим переключением при ошибках)
+- python3 visualisation/simple_visualization.py     # визуализация при остановленном процессе
 
-**Этот проект представляет собой систему обработки данных, которая:**
-- Разбивает данные фаила или потока на блоки размером `Crumb` и создает `Chunk`
-- Обрабатка ведется двумя способами:
-- Прямой порядок (beginning).
-- Обратный порядок (inversely).
-- Сохраняет результаты в соответствующие beginning.bin и inverse.bin, доступную для API 
-
-## 📂 Структура проекта
-Ze
-├── config.yaml
-├── data
-│   ├── beginning.bin
-│   ├── inverse.bin
-│   ├── inverse_matches.bin
-│   └── beginning_matches.bin
-├── files
-│   └── 001.txt
-├── go.mod
-├── go.sum
-├── internal
-│   ├── processor
-│   │   ├── beginning.go
-│   │   ├── config.go
-│   │   ├── counter_system.go
-│   │   ├── inversely.go
-│   │   └── model.go
-│   └── utils
-│       └── logger.go
-├── main.go
-├── output
-├── readme.md
-├── visualisation
-│   └── simple_visualization.py
-└── ze.log
-
-## ⚙️ Конфигурация
-processing:
-  crumb_size: 2                   # 0 < Размер Crumb в байтах < 5
-  chunk_power: 1024               # 2^(crumb_size*8) -1 < Размер Chunk < Вычислительные возможности
-  counter_value: 1000             # < 65536. Порог сброса счетчиков делением на 2
-  predict_increment: 2            # Шаг инкремента в пределах actualization_value при совпадении значений счетчика и Crumb
-  actualization_value: 0.75       # Доля от размера chunk_power при сортировании значений индексов от большего к меньщему,  (0 < x < 1)
-  increment: 3                    # Основной шаг инкремента при совпадении значения счетчика и и значения Crumb
-  initial_counters: 1024
-
-logging:
-  level: debug
-  level: info
+---
 
 ## 🔧 Алгоритм работы
 
