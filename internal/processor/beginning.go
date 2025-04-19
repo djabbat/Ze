@@ -1,9 +1,9 @@
 package processor
 
 import (
-	"math/rand"
-	"ze/internal/utils"
+	"errors"
 	"time"
+	"ze/internal/utils"
 )
 
 type BeginningProcessor struct {
@@ -12,10 +12,45 @@ type BeginningProcessor struct {
 }
 
 func NewBeginningProcessor(logger *utils.Logger, config *Config) *BeginningProcessor {
+	logger.SetDebug(config.Logging.DebugCounters)
 	return &BeginningProcessor{
 		logger: logger,
 		config: config,
 	}
+}
+
+func (p *BeginningProcessor) processBuffer(cs *CounterSystem, buffer []byte, crumbSize int) []byte {
+	if len(buffer) < crumbSize {
+		p.logger.Debug("Buffer too small (%d < %d)", len(buffer), crumbSize)
+		return buffer
+	}
+
+	for i := 0; i <= len(buffer)-crumbSize; i += crumbSize {
+		var crumb [4]byte
+		copy(crumb[:], buffer[i:i+crumbSize])
+
+		if p.config.Logging.DebugCounters {
+			p.logger.Debug("Processing crumb at offset %d: %v", i, crumb)
+		}
+
+		if err := cs.ProcessCrumb(crumb); err != nil {
+			if errors.Is(err, ErrMaxCounters) {
+				p.logger.Warn("Max counters reached, cannot add new counter for %v", crumb)
+			} else {
+				p.logger.Error("Crumb processing error: %v", err)
+			}
+		}
+	}
+
+	if p.config.Logging.DebugCounters {
+		p.logger.Debug("Finished processing buffer, total counters: %d", len(cs.counters))
+	}
+
+	if err := cs.IncrementChunkCounter(); err != nil {
+		p.logger.Error("Filtration error: %v", err)
+	}
+
+	return buffer[len(buffer)-(len(buffer)%crumbSize):]
 }
 
 func (p *BeginningProcessor) Process(dataChan <-chan []byte, done <-chan struct{}) {
@@ -24,9 +59,11 @@ func (p *BeginningProcessor) Process(dataChan <-chan []byte, done <-chan struct{
 
 	cs, err := NewCounterSystem(
 		"data/beginning.bin",
+		"data/beginning_matches.bin",
 		1<<p.config.Processing.CrumbSize,
 		p.config.Processing.CounterValue,
 		p.logger,
+		p.config,
 	)
 	if err != nil {
 		p.logger.Error("Failed to initialize counter system: %v", err)
@@ -40,10 +77,7 @@ func (p *BeginningProcessor) Process(dataChan <-chan []byte, done <-chan struct{
 
 	var chunkBuffer []byte
 	crumbSize := p.config.Processing.CrumbSize
-	p.logger.Debug("Crumb size: %d", crumbSize)
-
-	// Таймер для проверки зависаний
-	activityTimer := time.NewTimer(5 * time.Second)
+	activityTimer := time.NewTimer(p.config.Processing.ActivityTimeout)
 	defer activityTimer.Stop()
 
 	for {
@@ -56,61 +90,34 @@ func (p *BeginningProcessor) Process(dataChan <-chan []byte, done <-chan struct{
 				p.finalizeProcessing(cs, chunkBuffer, crumbSize)
 				return
 			}
-			p.logger.Debug("Received chunk: %d bytes", len(data))
-			
-			// Сброс таймера при получении данных
+
 			if !activityTimer.Stop() {
-				<-activityTimer.C
+				select {
+				case <-activityTimer.C:
+				default:
+				}
 			}
-			activityTimer.Reset(5 * time.Second)
-			
+			activityTimer.Reset(p.config.Processing.ActivityTimeout)
+
 			chunkBuffer = append(chunkBuffer, data...)
 			chunkBuffer = p.processBuffer(cs, chunkBuffer, crumbSize)
-			
+
 		case <-activityTimer.C:
-			p.logger.Warn("No activity for 5 seconds, stopping processor")
+			p.logger.Warn("No activity for %v, stopping processor", p.config.Processing.ActivityTimeout)
 			p.finalizeProcessing(cs, chunkBuffer, crumbSize)
 			return
 		}
 	}
 }
 
-func (p *BeginningProcessor) processBuffer(cs *CounterSystem, buffer []byte, crumbSize int) []byte {
-	if len(buffer) < crumbSize {
-		p.logger.Debug("Buffer too small (%d < %d)", len(buffer), crumbSize)
-		return buffer
-	}
-
-	for i := 0; i <= len(buffer)-crumbSize; i += crumbSize {
-		var crumb [4]byte
-		copy(crumb[:], buffer[i:i+crumbSize])
-		p.logger.Debug("Processing crumb at offset %d: %v", i, crumb)
-
-		increment := p.getIncrement()
-		if err := cs.ProcessCrumb(crumb, increment); err != nil {
-			p.logger.Error("Crumb processing error: %v", err)
-		}
-	}
-
-	return buffer[len(buffer)-(len(buffer)%crumbSize):]
-}
-
 func (p *BeginningProcessor) finalizeProcessing(cs *CounterSystem, buffer []byte, crumbSize int) {
 	if len(buffer) > 0 {
-		p.logger.Debug("Finalizing with %d bytes remaining", len(buffer))
 		padded := make([]byte, crumbSize)
 		copy(padded, buffer)
 		var crumb [4]byte
 		copy(crumb[:], padded)
-		if err := cs.ProcessCrumb(crumb, p.getIncrement()); err != nil {
+		if err := cs.ProcessCrumb(crumb); err != nil {
 			p.logger.Error("Final crumb processing error: %v", err)
 		}
 	}
-}
-
-func (p *BeginningProcessor) getIncrement() uint32 {
-	if rand.Float64() < p.config.Processing.Actualization {
-		return p.config.Processing.Increment
-	}
-	return p.config.Processing.PredictIncrement
 }

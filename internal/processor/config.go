@@ -1,21 +1,27 @@
 package processor
 
 import (
-	"os"
-	"errors"
 	"time"
 	"gopkg.in/yaml.v3"
+	"os"
 )
 
 type Config struct {
 	Processing struct {
-		CrumbSize        int     `yaml:"crumb_size"`
-		ChunkPower       int     `yaml:"chunk_power"`
-		CounterValue     uint32  `yaml:"counter_value"`
-		PredictIncrement uint32  `yaml:"predict_increment"`
-		Actualization    float64 `yaml:"actualization_value"`
-		Increment        uint32  `yaml:"increment"`
+		CrumbSize        int           `yaml:"crumb_size"`
+		ChunkPower       int           `yaml:"chunk_power"`
+		CounterValue     uint32        `yaml:"counter_value"`
+		PredictIncrement uint32        `yaml:"predict_increment"`
+		Actualization    float64       `yaml:"actualization_value"`
+		Increment        uint32        `yaml:"increment"`
+		InitialCounters  int           `yaml:"initial_counters"`
+		InitialID        uint32        `yaml:"initial_id"`
+		FiltrationValue  int           `yaml:"filtration_value"`
+		FiltrationPeriod int           `yaml:"filtration_period"`
+		ChannelBuffer    int           `yaml:"channel_buffer"`
+		ActivityTimeout  time.Duration `yaml:"activity_timeout"`
 	} `yaml:"processing"`
+
 	Radio struct {
 		Stations []struct {
 			URL        string `yaml:"url"`
@@ -24,6 +30,15 @@ type Config struct {
 		DefaultBuffer     int           `yaml:"default_buffer"`
 		ReconnectTimeout  time.Duration `yaml:"reconnect_timeout"`
 	} `yaml:"radio"`
+
+	Logging struct {
+		Level         string `yaml:"level"`
+		DebugCounters bool   `yaml:"debug_counters"`
+	} `yaml:"logging"`
+}
+
+func (c *Config) GetChunkSize() int {
+	return c.Processing.ChunkPower
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -36,22 +51,5 @@ func LoadConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
-
-	if config.Processing.CrumbSize < 2 || config.Processing.CrumbSize > 8 {
-		return nil, ErrInvalidCrumbSize
-	}
-	if config.Processing.Actualization <= 0 || config.Processing.Actualization >= 1 {
-		return nil, ErrInvalidActualization
-	}
-
 	return &config, nil
 }
-
-func (c *Config) GetChunkSize() int {
-    return c.Processing.ChunkPower
-}
-
-var (
-    ErrInvalidCrumbSize    = errors.New("invalid crumb size")
-    ErrInvalidActualization = errors.New("invalid actualization mode")
-)

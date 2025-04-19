@@ -2,11 +2,16 @@
 processing:
   crumb_size: 2                   # 1 < Размер Crumb в байтах
   chunk_power: 65536              # 2^crumb_size*8 < Размер Chunk < Вычислительные возможности
-  counter_value: 1024             # 2*2^ crumb_size < counter_value < 2^32. Порог сброса счетчиков делением на 2
-  predict_increment: 2            # Шаг инкремента в пределах actualization_value при совпадении значений счетчика и Crumb
-  actualization_value: 0.99       # Доля от размера chunk_power при сортировании значений индексов от большего к меньщему,  (0 < x < 1)
-  increment: 3                    # Основной шаг инкремента при совпадении значения счетчика и и значения Crumb
+  counter_value: 65536            # 2*2^ crumb_size < counter_value < 2^32. Порог сброса счетчиков делением на 2
+  predict_increment: 3            # Шаг инкремента в пределах actualization_value при совпадении значений счетчика и Crumb
+  actualization_value: 0.75       # Доля от размера chunk_power при сортировании значений индексов от большего к меньщему,  (0 < x < 1)
+  increment: 2                    # Основной шаг инкремента при совпадении значения счетчика и и значения Crumb
   initial_counters: 65536
+  filtration_value: 100           # Количество счетчиков с наименьшими значениями для удаления
+  filtration_period: 1000         # Количество обработанных Chunk между фильтрациями
+  initial_id: 1                   # Неизменяемый и уникальный индефикатор счетчика, присваеваемый при его создании
+  channel_buffer: 100             # Размер буфера канала
+  activity_timeout: 30s
 
 radio:
   stations:
@@ -19,8 +24,8 @@ radio:
     - url: "http://demo.azuracast.com/radio/8000/radio.mp3"
       buffer_size: 65536
   default_buffer: 65536
-  reconnect_timeout: 30s
+  reconnect_timeout: 60s
 
 logging:
-  level: debug
   level: info
+  debug_counters: true            # Детальное логирование работы счетчиков

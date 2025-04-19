@@ -6,13 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
-	"ze/internal/utils"
-)
 
-const (
-	counterEntrySize = 8 // 4 байта data + 4 байта value
-	maxCounters      = 65536
+	"ze/internal/utils"
 )
 
 var (
@@ -22,81 +19,182 @@ var (
 	ErrInvalidPath      = errors.New("invalid file path")
 )
 
-type CounterSystem struct {
-	filepath       string
-	counters       []Counter
-	resetThreshold uint32
-	mu             sync.RWMutex
-	logger         *utils.Logger
+const (
+	counterEntrySize = 16 // 4 (ID) + 4 (data) + 4 (value) + 4 (matches)
+	maxCounters      = 1 << 24
+)
+
+type Counter struct {
+	ID      uint32
+	Data    [4]byte
+	Value   uint32
+	Matches uint32
 }
 
-func NewCounterSystem(filepath string, initialSize int, threshold uint32, logger *utils.Logger) (*CounterSystem, error) {
+type CounterSystem struct {
+	filepath        string
+	matchesPath     string
+	counters        []Counter
+	resetThreshold  uint32
+	mu              sync.RWMutex
+	logger          *utils.Logger
+	config          *Config
+	chunkCounter    int
+	totalMatches    uint64
+	lastID          uint32
+}
+
+func NewCounterSystem(countersPath, matchesPath string, initialSize int, threshold uint32, logger *utils.Logger, config *Config) (*CounterSystem, error) {
 	if initialSize <= 0 || initialSize > maxCounters {
 		return nil, fmt.Errorf("invalid initial size: %d (must be 1-%d)", initialSize, maxCounters)
 	}
 
+	if err := os.MkdirAll(filepath.Dir(countersPath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create data directory: %v", err)
+	}
+
+	matchesFile, err := os.OpenFile(matchesPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create matches file: %v", err)
+	}
+	matchesFile.Close()
+
 	cs := &CounterSystem{
-		filepath:       filepath,
+		filepath:       countersPath,
+		matchesPath:    matchesPath,
 		counters:       make([]Counter, 0, initialSize),
 		resetThreshold: threshold,
 		logger:         logger,
+		config:         config,
+		lastID:         config.Processing.InitialID,
 	}
 
-	if err := cs.initialize(); err != nil {
-		return nil, fmt.Errorf("failed to initialize counter system: %v", err)
+	if err := cs.load(); err != nil {
+		if err := cs.initializeFile(); err != nil {
+			return nil, fmt.Errorf("failed to initialize counter system: %v", err)
+		}
 	}
 
 	return cs, nil
 }
 
-func (cs *CounterSystem) initialize() error {
-	cs.logger.Debug("Initializing counter system at %s", cs.filepath)
-
-	if err := os.MkdirAll(filepath.Dir(cs.filepath), 0755); err != nil {
-		return fmt.Errorf("failed to create data directory: %v", err)
-	}
-
-	if _, err := os.Stat(cs.filepath); os.IsNotExist(err) {
-		return cs.initializeFile()
-	}
-	return cs.load()
-}
-
 func (cs *CounterSystem) initializeFile() error {
-	cs.logger.Debug("Creating new counter file: %s", cs.filepath)
-
 	file, err := os.Create(cs.filepath)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %v", err)
 	}
 	defer file.Close()
-
-	for i := 0; i < cap(cs.counters); i++ {
-		var crumb [4]byte
-		binary.BigEndian.PutUint32(crumb[:], uint32(i))
-
-		counter := Counter{
-			Data:  crumb,
-			Value: 1,
-		}
-
-		if err := binary.Write(file, binary.BigEndian, counter.Data); err != nil {
-			return fmt.Errorf("failed to write data: %v", err)
-		}
-		if err := binary.Write(file, binary.BigEndian, counter.Value); err != nil {
-			return fmt.Errorf("failed to write value: %v", err)
-		}
-
-		cs.counters = append(cs.counters, counter)
-	}
-
-	cs.logger.Info("Initialized %d counters in %s", len(cs.counters), cs.filepath)
 	return nil
 }
 
-func (cs *CounterSystem) load() error {
-	cs.logger.Debug("Loading existing counter file: %s", cs.filepath)
+func (cs *CounterSystem) ProcessCrumb(crumb [4]byte) error {
+    cs.mu.Lock()
+    defer cs.mu.Unlock()
 
+    if err := cs.checkReset(); err != nil {
+        return err
+    }
+
+    crumbID := binary.BigEndian.Uint32(crumb[:])
+    found := false
+
+    // Сначала проверяем в актуализационной зоне
+    actualizationBoundary := int(float64(len(cs.counters)) * cs.config.Processing.Actualization)
+    for i := 0; i < len(cs.counters); i++ {
+        if cs.counters[i].ID == crumbID {
+            found = true
+            if i < actualizationBoundary {
+                cs.counters[i].Value += cs.config.Processing.PredictIncrement
+            } else {
+                cs.counters[i].Value += cs.config.Processing.Increment
+            }
+            cs.counters[i].Matches++
+            cs.totalMatches++
+            
+            // Записываем совпадение в файл
+            if err := cs.logMatch(crumb, cs.counters[i].Value); err != nil {
+                cs.logger.Error("Failed to log match: %v", err)
+            }
+            break
+        }
+    }
+
+    if !found {
+        if len(cs.counters) >= maxCounters {
+            return ErrMaxCounters
+        }
+        cs.counters = append(cs.counters, Counter{
+            ID:    crumbID,
+            Data:  crumb,
+            Value: cs.config.Processing.Increment,
+        })
+    }
+
+    return cs.save()
+}
+
+func (cs *CounterSystem) logMatch(crumb [4]byte, value uint32) error {
+    file, err := os.OpenFile(cs.matchesPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        return err
+    }
+    defer file.Close()
+
+    // Записываем ID (crumb) и значение счетчика
+    if err := binary.Write(file, binary.BigEndian, crumb); err != nil {
+        return err
+    }
+    if err := binary.Write(file, binary.BigEndian, value); err != nil {
+        return err
+    }
+    return nil
+}
+
+func (cs *CounterSystem) IncrementChunkCounter() error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	cs.chunkCounter++
+
+	if cs.chunkCounter >= cs.config.Processing.FiltrationPeriod {
+		cs.chunkCounter = 0
+		return cs.filterCounters(cs.config.Processing.FiltrationValue)
+	}
+	return nil
+}
+
+func (cs *CounterSystem) checkReset() error {
+	for _, counter := range cs.counters {
+		if counter.Value >= cs.resetThreshold {
+			cs.logger.Info("Reset threshold reached (%d), resetting counters", cs.resetThreshold)
+			return cs.resetAllCounters()
+		}
+	}
+	return nil
+}
+
+func (cs *CounterSystem) resetAllCounters() error {
+	for i := range cs.counters {
+		cs.counters[i].Value /= 2
+		cs.counters[i].Matches = 0
+	}
+	return cs.save()
+}
+
+func (cs *CounterSystem) filterCounters(count int) error {
+	if count <= 0 || len(cs.counters) <= count {
+		return nil
+	}
+
+	sort.Slice(cs.counters, func(i, j int) bool {
+		return cs.counters[i].Value < cs.counters[j].Value
+	})
+
+	cs.counters = cs.counters[count:]
+	return cs.save()
+}
+
+func (cs *CounterSystem) load() error {
 	file, err := os.Open(cs.filepath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %v", err)
@@ -112,108 +210,64 @@ func (cs *CounterSystem) load() error {
 		return ErrInvalidFileSize
 	}
 
-	var data [4]byte
-	var value uint32
-
 	for {
-		if err := binary.Read(file, binary.BigEndian, &data); err != nil {
+		var counter Counter
+		if err := binary.Read(file, binary.BigEndian, &counter.ID); err != nil {
 			break
 		}
-		if err := binary.Read(file, binary.BigEndian, &value); err != nil {
+		if err := binary.Read(file, binary.BigEndian, &counter.Data); err != nil {
+			break
+		}
+		if err := binary.Read(file, binary.BigEndian, &counter.Value); err != nil {
+			break
+		}
+		if err := binary.Read(file, binary.BigEndian, &counter.Matches); err != nil {
 			break
 		}
 
-		cs.counters = append(cs.counters, Counter{
-			Data:  data,
-			Value: value,
-		})
-	}
-
-	cs.logger.Info("Loaded %d counters from %s", len(cs.counters), cs.filepath)
-	return nil
-}
-
-func (cs *CounterSystem) ProcessCrumb(crumb [4]byte, increment uint32) error {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	cs.logger.Debug("Processing crumb: %v with increment %d", crumb, increment)
-
-	for i := range cs.counters {
-		if cs.counters[i].Data == crumb {
-			oldValue := cs.counters[i].Value
-			cs.counters[i].Increment(increment)
-			cs.logger.Debug("Counter updated: %v %d -> %d", crumb, oldValue, cs.counters[i].Value)
-			
-			if err := cs.checkReset(); err != nil {
-				return err
-			}
-			return cs.save()
-		}
-	}
-
-	if len(cs.counters) >= maxCounters {
-		return ErrMaxCounters
-	}
-
-	cs.counters = append(cs.counters, Counter{
-		Data:  crumb,
-		Value: increment,
-	})
-	
-	cs.logger.Debug("New counter created: %v = %d", crumb, increment)
-	return cs.save()
-}
-
-func (cs *CounterSystem) checkReset() error {
-	for _, counter := range cs.counters {
-		if counter.Value >= cs.resetThreshold {
-			cs.logger.Info("Reset threshold reached (%d), resetting counters", cs.resetThreshold)
-			return cs.resetAllCounters()
+		cs.counters = append(cs.counters, counter)
+		if counter.ID > cs.lastID {
+			cs.lastID = counter.ID
 		}
 	}
 	return nil
-}
-
-func (cs *CounterSystem) resetAllCounters() error {
-	for i := range cs.counters {
-		oldValue := cs.counters[i].Value
-		cs.counters[i].Reset()
-		cs.logger.Debug("Counter reset: %d -> %d", oldValue, cs.counters[i].Value)
-	}
-	return cs.save()
 }
 
 func (cs *CounterSystem) save() error {
-	tmpPath := cs.filepath + ".tmp"
-	file, err := os.Create(tmpPath)
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %v", err)
-	}
+    tmpPath := cs.filepath + ".tmp"
+    file, err := os.Create(tmpPath)
+    if err != nil {
+        return fmt.Errorf("failed to create temp file: %v", err)
+    }
+    defer file.Close()
 
-	for _, counter := range cs.counters {
-		if err := binary.Write(file, binary.BigEndian, counter.Data); err != nil {
-			file.Close()
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to write data: %v", err)
-		}
-		if err := binary.Write(file, binary.BigEndian, counter.Value); err != nil {
-			file.Close()
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to write value: %v", err)
-		}
-	}
+    // Записываем количество счетчиков
+    if err := binary.Write(file, binary.LittleEndian, uint32(len(cs.counters))); err != nil {
+        return err
+    }
 
-	if err := file.Close(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to close file: %v", err)
-	}
+    // Записываем каждый счетчик
+    for _, counter := range cs.counters {
+        // ID (uint32)
+        if err := binary.Write(file, binary.LittleEndian, counter.ID); err != nil {
+            return err
+        }
+        // Data (4 байта)
+        if err := binary.Write(file, binary.LittleEndian, counter.Data); err != nil {
+            return err
+        }
+        // Value (uint32)
+        if err := binary.Write(file, binary.LittleEndian, counter.Value); err != nil {
+            return err
+        }
+        // Matches (uint32)
+        if err := binary.Write(file, binary.LittleEndian, counter.Matches); err != nil {
+            return err
+        }
+    }
 
-	if err := os.Rename(tmpPath, cs.filepath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to rename file: %v", err)
-	}
-
-	cs.logger.Debug("Saved %d counters to %s", len(cs.counters), cs.filepath)
-	return nil
+    if err := os.Rename(tmpPath, cs.filepath); err != nil {
+        return fmt.Errorf("failed to rename file: %v", err)
+    }
+    return nil
 }
