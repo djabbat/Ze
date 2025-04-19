@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -57,12 +58,7 @@ func main() {
 	inverseProc := processor.NewInverseProcessor(logger, config)
 
 	switch mode {
-	case "f":
-		if err := runSystem(mode, filename, beginningProc, inverseProc, logger, config); err != nil {
-			logger.Error("System error: %v", err)
-			os.Exit(1)
-		}
-	case "r":
+	case "f", "r", "radio":
 		if err := runSystem(mode, filename, beginningProc, inverseProc, logger, config); err != nil {
 			logger.Error("System error: %v", err)
 			os.Exit(1)
@@ -113,7 +109,7 @@ func parseArgs() (string, string, error) {
 	args := flag.Args()
 
 	if len(args) < 1 {
-		return "", "", fmt.Errorf("missing mode argument (use 'f' or 'r')")
+		return "", "", fmt.Errorf("missing mode argument (use 'f', 'r' or 'radio')")
 	}
 
 	mode := args[0]
@@ -127,10 +123,10 @@ func parseArgs() (string, string, error) {
 			return "", "", fmt.Errorf("file not found: %s", filename)
 		}
 		return mode, filename, nil
-	case "r":
+	case "r", "radio":
 		return mode, "", nil
 	default:
-		return "", "", fmt.Errorf("invalid mode: %s (use 'f' or 'r')", mode)
+		return "", "", fmt.Errorf("invalid mode: %s (use 'f', 'r' or 'radio')", mode)
 	}
 }
 
@@ -138,6 +134,7 @@ func printUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  File mode:   ./ze f <filename>")
 	fmt.Println("  Stream mode: ./ze r")
+	fmt.Println("  Radio mode:  ./ze radio")
 }
 
 func processFile(filename string, dataChan chan<- []byte, done <-chan struct{}, 
@@ -244,6 +241,9 @@ func runSystem(mode, filename string, beginningProc *processor.BeginningProcesso
 	case "r":
 		logger.Info("Processing random stream")
 		processErr = processStream(dataChan, done, logger, config.GetChunkSize())
+	case "radio":
+		logger.Info("Processing radio stream")
+		processErr = processRadio(dataChan, done, logger, config)
 	default:
 		return fmt.Errorf("unknown mode: %s", mode)
 	}
@@ -282,4 +282,64 @@ func processStream(dataChan chan<- []byte, done <-chan struct{},
 	}
 }
 
-// ... остальные функции (parseArgs, printUsage, startVisualization, stopVisualization) без изменений ...
+func processRadio(dataChan chan<- []byte, done <-chan struct{}, 
+	logger *utils.Logger, config *processor.Config) error {
+	defer close(dataChan)
+	
+	if len(config.Radio.Stations) == 0 {
+		return fmt.Errorf("no radio stations configured")
+	}
+
+	station := config.Radio.Stations[0]
+	bufferSize := station.BufferSize
+	if bufferSize == 0 {
+		bufferSize = config.Radio.DefaultBuffer
+	}
+
+	logger.Info("Connecting to radio station: %s (buffer: %d)", station.URL, bufferSize)
+
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", station.URL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to radio: %v", err)
+	}
+	defer resp.Body.Close()
+
+	buffer := make([]byte, bufferSize)
+	for {
+		select {
+		case <-done:
+			logger.Info("Radio processing interrupted")
+			return nil
+		default:
+			n, err := resp.Body.Read(buffer)
+			if err != nil {
+				if err == io.EOF {
+					logger.Info("Radio stream ended")
+					return nil
+				}
+				return fmt.Errorf("error reading radio stream: %v", err)
+			}
+
+			if n == 0 {
+				continue
+			}
+
+			data := make([]byte, n)
+			copy(data, buffer[:n])
+
+			select {
+			case dataChan <- data:
+				logger.Debug("Sent radio chunk of %d bytes", n)
+			case <-done:
+				logger.Info("Radio processing interrupted during send")
+				return nil
+			}
+		}
+	}
+}

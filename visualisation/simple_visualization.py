@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 import matplotlib.widgets as widgets
 from datetime import datetime
+import yaml
 
 class Statistics:
     def __init__(self):
@@ -16,15 +17,17 @@ class Statistics:
         self.match_history = []
         self.chunk_history = []
         self.last_update = datetime.now()
-    
-    def update(self, counters):
-        if len(counters) == 0:
-            return
-        
-        self.total_crumbs += len(counters)
-        self.match_history.append(np.sum(counters[:, 3] > 0))
-        self.chunk_history.append(self.total_chunks)
-        self.last_update = datetime.now()
+
+def load_config():
+    try:
+        with open("config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+            if 'processing' not in config:
+                config['processing'] = {}
+            return config
+    except Exception as e:
+        print(f"Error loading config: {str(e)}")
+        return {'processing': {}}
 
 def safe_read_counters(filename):
     try:
@@ -56,33 +59,17 @@ def safe_read_counters(filename):
         print(f"Error reading {filename}: {str(e)}")
         return np.zeros((0, 4))
 
-def safe_read_matches(filename):
-    try:
-        if not os.path.exists(filename) or os.path.getsize(filename) == 0:
-            return np.zeros((0, 2))
-        
-        with open(filename, 'rb') as f:
-            data = np.fromfile(f, dtype=np.uint32)
-            return data.reshape(-1, 2)
-            
-    except Exception as e:
-        print(f"Error reading matches file {filename}: {str(e)}")
-        return np.zeros((0, 2))
-
-def get_top_counters(counters, n=3):
-    if len(counters) == 0:
-        return []
-    
-    sorted_indices = np.argsort(-counters[:, 2])
-    top_indices = sorted_indices[:min(n, len(counters))]
-    
-    return [(int(counters[i, 0]), int(counters[i, 2])) for i in top_indices]
-
 def should_stop():
     return os.path.exists("data/stop.flag")
 
+def calculate_match_ratio(current_matches, total_crumbs):
+    if total_crumbs == 0:
+        return 0.0
+    return current_matches / total_crumbs
+
 def main():
     Path("data").mkdir(exist_ok=True)
+    config = load_config()
     
     plt.ion()
     fig = plt.figure(figsize=(14, 8))
@@ -91,7 +78,7 @@ def main():
     # Настройка областей графиков
     ax_beg = plt.subplot2grid((2, 2), (0, 0))
     ax_inv = plt.subplot2grid((2, 2), (0, 1))
-    ax_plot = plt.subplot2grid((2, 2), (1, 0))
+    ax_ratio = plt.subplot2grid((2, 2), (1, 0))
     ax_stats = plt.subplot2grid((2, 2), (1, 1))
     
     # Настройка отступов
@@ -135,82 +122,86 @@ def main():
             # Чтение данных
             beg_data = safe_read_counters("data/beginning.bin")
             inv_data = safe_read_counters("data/inverse.bin")
-            beg_matches = safe_read_matches("data/beginning_matches.bin")
-            inv_matches = safe_read_matches("data/inverse_matches.bin")
             
             # Обновление статистики
             beg_stats.total_chunks += 1
             inv_stats.total_chunks += 1
-            beg_stats.update(beg_data)
-            inv_stats.update(inv_data)
+            
+            beg_stats.total_crumbs += len(beg_data)
+            inv_stats.total_crumbs += len(inv_data)
+            
+            current_beg_matches = np.sum(beg_data[:, 3] > 0) if len(beg_data) > 0 else 0
+            current_inv_matches = np.sum(inv_data[:, 3] > 0) if len(inv_data) > 0 else 0
+            
+            beg_stats.match_history.append(current_beg_matches)
+            inv_stats.match_history.append(current_inv_matches)
+            
+            beg_stats.chunk_history.append(beg_stats.total_chunks)
+            inv_stats.chunk_history.append(inv_stats.total_chunks)
+            
+            beg_stats.last_update = datetime.now()
+            inv_stats.last_update = datetime.now()
             
             # Очистка графиков
             ax_beg.clear()
             ax_inv.clear()
-            ax_plot.clear()
+            ax_ratio.clear()
             ax_stats.clear()
             
-            # График Beginning
+            # График Beginning - количество счетчиков
             if len(beg_data) > 0:
                 ax_beg.plot(beg_data[:, 2], 'b-', linewidth=0.8)
-                matches = np.where(beg_data[:, 3] > 0)
-                ax_beg.plot(matches, beg_data[matches, 2], 'ro', markersize=3)
-                ax_beg.set_title(f'Beginning (N={len(beg_data)})')
+                ax_beg.set_title(f'Beginning Counters (Total: {len(beg_data)})')
                 ax_beg.grid(True, linestyle=':', alpha=0.5)
             
-            # График Inverse
+            # График Inverse - количество счетчиков
             if len(inv_data) > 0:
                 ax_inv.plot(inv_data[:, 2], 'm-', linewidth=0.8)
-                matches = np.where(inv_data[:, 3] > 0)
-                ax_inv.plot(matches, inv_data[matches, 2], 'bo', markersize=3)
-                ax_inv.set_title(f'Inverse (N={len(inv_data)})')
+                ax_inv.set_title(f'Inverse Counters (Total: {len(inv_data)})')
                 ax_inv.grid(True, linestyle=':', alpha=0.5)
             
-            # График истории совпадений
-            if beg_stats.chunk_history:
-                ax_plot.plot(beg_stats.chunk_history, beg_stats.match_history, 'b-', label='Beginning')
-                ax_plot.plot(inv_stats.chunk_history, inv_stats.match_history, 'm-', label='Inverse')
-                ax_plot.set_title('Matches History')
-                ax_plot.legend(loc='upper left')
-                ax_plot.grid(True, linestyle=':', alpha=0.5)
+            # График соотношения Matches/Crumbs
+            if beg_stats.total_crumbs > 0 and inv_stats.total_crumbs > 0:
+                beg_ratio = [m/beg_stats.total_crumbs for m in beg_stats.match_history]
+                inv_ratio = [m/inv_stats.total_crumbs for m in inv_stats.match_history]
+                
+                ax_ratio.plot(beg_ratio, 'b-', label='Beginning')
+                ax_ratio.plot(inv_ratio, 'm-', label='Inverse')
+                ax_ratio.set_title('Matches/Crumbs Ratio')
+                ax_ratio.legend(loc='upper left')
+                ax_ratio.grid(True, linestyle=':', alpha=0.5)
             
             # Текстовая статистика
             ax_stats.axis('off')
             
-            # Получаем топ-3 счетчиков
-            beg_top = get_top_counters(beg_data, 3)
-            inv_top = get_top_counters(inv_data, 3)
-            
             # Формируем текст статистики
             stats_text = f"Last Update: {datetime.now().strftime('%H:%M:%S')}\n\n"
             
+            # Параметры конфигурации
+            stats_text += "Configuration Parameters:\n"
+            stats_text += f"crumb_size: {config['processing'].get('crumb_size', 2)}\n"
+            stats_text += f"chunk_power: {config['processing'].get('chunk_power', 65536)}\n"
+            stats_text += f"counter_value: {config['processing'].get('counter_value', 65536)}\n"
+            stats_text += f"predict_increment: {config['processing'].get('predict_increment', 3)}\n"
+            stats_text += f"actualization_value: {config['processing'].get('actualization_value', 0.99)}\n"
+            stats_text += f"increment: {config['processing'].get('increment', 2)}\n"
+            stats_text += f"filtration_value: {config['processing'].get('filtration_value', 100)}\n"
+            stats_text += f"filtration_period: {config['processing'].get('filtration_period', 1000)}\n"
+            stats_text += f"initial_id: {config['processing'].get('initial_id', 1)}\n\n"
+            
             # Beginning статистика
             stats_text += "Beginning Processor:\n"
-            stats_text += f"Chunks: {beg_stats.total_chunks}\n"
             stats_text += f"Total Crumbs: {beg_stats.total_crumbs}\n"
-            stats_text += f"Current Matches: {beg_stats.match_history[-1] if beg_stats.match_history else 0}\n"
-            
-            if len(beg_matches) > 0:
-                stats_text += f"Last Match: ID={beg_matches[-1][0]} (V={beg_matches[-1][1]})\n"
-            
-            stats_text += "\nTop Counters:\n"
-            for i, (id_val, val) in enumerate(beg_top, 1):
-                stats_text += f"{i}. ID={id_val} (V={val})\n"
+            stats_text += f"Current Matches: {current_beg_matches}\n"
+            stats_text += f"Matches/Crumb: {calculate_match_ratio(current_beg_matches, beg_stats.total_crumbs):.4f}\n\n"
             
             # Inverse статистика
-            stats_text += "\nInverse Processor:\n"
-            stats_text += f"Chunks: {inv_stats.total_chunks}\n"
+            stats_text += "Inverse Processor:\n"
             stats_text += f"Total Crumbs: {inv_stats.total_crumbs}\n"
-            stats_text += f"Current Matches: {inv_stats.match_history[-1] if inv_stats.match_history else 0}\n"
+            stats_text += f"Current Matches: {current_inv_matches}\n"
+            stats_text += f"Matches/Crumb: {calculate_match_ratio(current_inv_matches, inv_stats.total_crumbs):.4f}"
             
-            if len(inv_matches) > 0:
-                stats_text += f"Last Match: ID={inv_matches[-1][0]} (V={inv_matches[-1][1]})\n"
-            
-            stats_text += "\nTop Counters:\n"
-            for i, (id_val, val) in enumerate(inv_top, 1):
-                stats_text += f"{i}. ID={id_val} (V={val})"
-            
-            ax_stats.text(0.05, 0.95, stats_text, fontsize=9, family='monospace',
+            ax_stats.text(0.05, 0.95, stats_text, fontsize=8, family='monospace',
                         verticalalignment='top', bbox=dict(facecolor='white', alpha=0.7))
             
             plt.pause(1.0)
