@@ -1,0 +1,14 @@
+{
+  "CrumbSize": 2,
+  "ChunkSize": 65536,
+  "CounterValue": 65536,
+  "PredictIncrement": 4,
+  "Increment": 2,
+  "ActualizationValue": 0.9,
+  "FiltrationValue": 0.5,
+  "InputFiles": [
+      "input/input.bin"
+  ],
+  "OutputFolder": "data",
+  "MatchSuffix": "_matches.bin"
+}
