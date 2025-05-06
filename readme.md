@@ -3,7 +3,7 @@
 ## 🚀 Launch:  
 
 ```
-python3 main.py
+go run main.go
 
 ```
 
