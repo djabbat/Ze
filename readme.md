@@ -1,10 +1,44 @@
 Вы правы! Добавлю недостающие описания в README.md:
 
-## Обновленный `README.md`
-
 ```markdown
 # Ze Project
 
+```markdown
+## 📦 Установка зависимостей
+
+```bash
+# Установить все зависимости
+pip install -r requirements.txt
+
+# Или использовать скрипт установки
+python3 install_dependencies.py
+
+# Проверить установленные зависимости
+python3 install_dependencies.py check
+```
+
+### Требования к системе:
+- **Python 3.8+**
+- **PortAudio** (для pyaudio на Linux):
+  ```bash
+  # Ubuntu/Debian
+  sudo apt-get install portaudio19-dev python3-pyaudio
+  
+  # macOS
+  brew install portaudio
+  
+  # Windows: автоматически устанавливается с pyaudio
+  ```
+```
+
+Теперь добавь `requirements.txt` в проект и запуши на GitHub! 🚀
+  
+  # macOS
+  brew install portaudio
+  
+  # Windows: автоматически устанавливается с pyaudio
+  ```
+```
 ## 🚀 Запуск:
 
 ```bash
