@@ -12,13 +12,21 @@ PREDICT_INCREMENT = 5  # Инкремент для зоны актуализац
 INCREMENT = 1         # Инкремент для остальных зон
 ACTUALIZATION_RATIO = 0.2  # Доля счетчиков в зоне актуализации (20%)
 
-# Байесовские параметры
+# Базовые байесовские параметры
 BAYES_ALPHA = 1.0     # Alpha параметр для априорного распределения
 BAYES_BETA = 1.0      # Beta параметр для априорного распределения
 CONFIDENCE_THRESHOLD = 0.7  # Порог уверенности для байесовского предсказания
 MIN_OBSERVATIONS = 10  # Минимальное количество наблюдений для байесовского предсказания
 
+# Иерархические байесовские параметры
+HIERARCHICAL_ENABLED = True  # Включить иерархические модели
+GROUP_SIZE = 8              # Размер группы для иерархического анализа
+HIERARCHICAL_ALPHA_PRIOR = 2.0  # Априорное значение для alpha гиперпараметра
+HIERARCHICAL_BETA_PRIOR = 2.0   # Априорное значение для beta гиперпараметра
+CONTEXT_DEPTH = 3           # Глубина контекста для иерархического анализа
+
 # Пути к файлам
 INPUT_FILE = "input/input.bin"
 OUTPUT_DIR = "output"
 STATS_DIR = "stats"
+HIERARCHICAL_DIR = "hierarchical"

@@ -15,6 +15,9 @@ class Processor:
         # Счетчики для Crumb'ов
         self.counters: Dict[int, int] = {}  # key: crumb_value, value: counter
         
+        # История для контекста иерархических моделей
+        self.context_history: List[int] = []
+        
         # Статистика
         self.total_matches_actualization = 0
         self.total_matches_others = 0
@@ -27,41 +30,45 @@ class Processor:
         self.stats_file = os.path.join(STATS_DIR, f"{name}_matches.bin")  # Статистика в stats
 
     def process_crumb(self, crumb: int) -> None:
-        """Обработка одного Crumb'а с байесовским предсказанием"""
+        """Обработка одного Crumb'а с улучшенным байесовским предсказанием"""
         self._increment_total_crumbs()
         
-        # Шаг 1: Попробовать байесовское предсказание
-        predicted_crumb = self._try_bayesian_prediction(crumb)
-        if predicted_crumb is not None:
+        # Получить текущий контекст для иерархического анализа
+        current_context = self._get_current_context()
+        
+        # Шаг 1: Попробовать улучшенное предсказание с иерархическими моделями
+        prediction_result = self._try_enhanced_prediction(crumb, current_context)
+        if prediction_result is not None:
+            predicted_crumb, probability, confidence, method = prediction_result
             self.total_bayesian_hits += 1
-            # Обновляем байесовскую статистику
-            self.bayesian.record_prediction_result(predicted_crumb, crumb)
+            
+            # Обновить статистику с учетом контекста
+            self.bayesian.record_prediction_result(predicted_crumb, crumb, current_context)
+            
             # Также обрабатываем через стандартный алгоритм
             self._standard_processing(crumb, is_predicted=True)
+            
+            # Обновить историю контекста
+            self._update_context_history(crumb)
             return
         
         # Шаг 2: Стандартная обработка
         self._standard_processing(crumb, is_predicted=False)
-        # Обновляем байесовскую статистику (не было предсказания)
+        
+        # Обновить базовую статистику
         self.bayesian.update_stats(crumb, True)
+        self.bayesian.update_context(crumb)
+        
+        # Обновить историю контекста
+        self._update_context_history(crumb)
 
-    def _try_bayesian_prediction(self, current_crumb: int) -> Optional[int]:
-        """Попытка байесовского предсказания"""
-        # Получаем список доступных Crumb'ов (топ-N самых частых)
+    def _try_enhanced_prediction(self, current_crumb: int, context: List[int]) -> Optional[Tuple]:
+        """Улучшенная попытка предсказания с иерархическими моделями"""
         available_crumbs = self._get_available_crumbs()
         if not available_crumbs:
             return None
             
-        # Используем контекст (последние несколько Crumb'ов)
-        context = self._get_recent_context()
-        
-        # Получаем предсказание от байесовского предсказателя
-        prediction = self.bayesian.predict_next(context, available_crumbs)
-        if prediction is not None:
-            predicted_crumb, probability, confidence = prediction
-            return predicted_crumb
-            
-        return None
+        return self.bayesian.predict_next(context, available_crumbs)
 
     def _get_available_crumbs(self) -> List[int]:
         """Получить список доступных Crumb'ов для предсказания"""
@@ -69,11 +76,17 @@ class Processor:
         sorted_counters = sorted(self.counters.items(), key=lambda x: x[1], reverse=True)
         return [crumb for crumb, count in sorted_counters[:min(50, len(sorted_counters))]]
 
-    def _get_recent_context(self, context_size: int = 3) -> List[int]:
-        """Получить недавний контекст (упрощенная версия)"""
-        # В реальной реализации здесь нужно хранить историю Crumb'ов
-        # Для простоты возвращаем пустой контекст
-        return []
+    def _get_current_context(self) -> List[int]:
+        """Получить текущий контекст для иерархического анализа"""
+        # Возвращаем последние N Crumb'ов как контекст
+        return self.context_history[-CONTEXT_DEPTH:] if self.context_history else []
+
+    def _update_context_history(self, crumb: int) -> None:
+        """Обновить историю контекста"""
+        self.context_history.append(crumb)
+        # Ограничить глубину контекста для экономии памяти
+        if len(self.context_history) > CONTEXT_DEPTH * 3:
+            self.context_history = self.context_history[-CONTEXT_DEPTH * 2:]
 
     def _standard_processing(self, crumb: int, is_predicted: bool) -> None:
         """Стандартная обработка Crumb'а"""
@@ -189,7 +202,7 @@ class Processor:
             for key, value in stats:
                 f.write(struct.pack(">II", key, value))
         
-        # Сохраняем байесовскую статистику в stats
+        # Сохраняем байесовскую статистику (включая иерархические модели)
         self.bayesian.save_state()
 
     def load_state(self) -> None:
@@ -223,7 +236,7 @@ class Processor:
                     elif key == 4:
                         self.total_bayesian_hits = value
         
-        # Загружаем байесовскую статистику из stats
+        # Загружаем байесовскую статистику (включая иерархические модели)
         self.bayesian.load_state()
 
 
@@ -283,6 +296,7 @@ def main():
     os.makedirs("input", exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(STATS_DIR, exist_ok=True)
+    os.makedirs(HIERARCHICAL_DIR, exist_ok=True)
     
     # Проверяем существование входного файла
     if not os.path.exists(INPUT_FILE):
@@ -299,10 +313,16 @@ def main():
     print(f"  PREDICT_INCREMENT: {PREDICT_INCREMENT}")
     print(f"  INCREMENT: {INCREMENT}")
     print(f"  ACTUALIZATION_RATIO: {ACTUALIZATION_RATIO}")
-    print(f"  Байесовские параметры:")
+    print(f"  Базовые байесовские параметры:")
     print(f"    ALPHA: {BAYES_ALPHA}, BETA: {BAYES_BETA}")
     print(f"    CONFIDENCE_THRESHOLD: {CONFIDENCE_THRESHOLD}")
     print(f"    MIN_OBSERVATIONS: {MIN_OBSERVATIONS}")
+    print(f"  Иерархические параметры:")
+    print(f"    Включено: {HIERARCHICAL_ENABLED}")
+    print(f"    GROUP_SIZE: {GROUP_SIZE}")
+    print(f"    CONTEXT_DEPTH: {CONTEXT_DEPTH}")
+    print(f"    ALPHA_PRIOR: {HIERARCHICAL_ALPHA_PRIOR}")
+    print(f"    BETA_PRIOR: {HIERARCHICAL_BETA_PRIOR}")
     print()
     
     # Инициализация процессоров
@@ -341,50 +361,75 @@ def main():
                     # Выводим информацию о максимальных счетчиках и статистике
                     if beginning_processor.counters:
                         max_begin = max(beginning_processor.counters.values())
-                        print(f"  Beginning макс. счетчик: {max_begin}")
+                        print(f"  Beginning: счетчиков={len(beginning_processor.counters)}, макс={max_begin}")
                     if inverse_processor.counters:
                         max_inverse = max(inverse_processor.counters.values())
-                        print(f"  Inverse макс. счетчик: {max_inverse}")
+                        print(f"  Inverse: счетчиков={len(inverse_processor.counters)}, макс={max_inverse}")
         
         # Финальное сохранение
         beginning_processor.save_state()
         inverse_processor.save_state()
         
-        print("\nОбработка завершена!")
+        print("\n" + "="*50)
+        print("ОБРАБОТКА ЗАВЕРШЕНА!")
+        print("="*50)
         print(f"Обработано chunk'ов: {chunk_count}")
-        print(f"Beginning процессор - Crumb'ов: {beginning_processor.total_crumbs}, "
-              f"Счетчиков: {len(beginning_processor.counters)}")
-        print(f"Inverse процессор - Crumb'ов: {inverse_processor.total_crumbs}, "
-              f"Счетчиков: {len(inverse_processor.counters)}")
+        print(f"Общее количество Crumb'ов: {beginning_processor.total_crumbs + inverse_processor.total_crumbs}")
         
-        # Вывод статистики
-        print("\nСтатистика Beginning:")
+        # Вывод статистики процессоров
+        print("\n📊 СТАТИСТИКА ПРОЦЕССОРОВ:")
+        print("\nBeginning процессор:")
+        print(f"  Обработано Crumb'ов: {beginning_processor.total_crumbs}")
+        print(f"  Уникальных счетчиков: {len(beginning_processor.counters)}")
         print(f"  Совпадения в зоне актуализации: {beginning_processor.total_matches_actualization}")
-        print(f"  Совпадения в остальных: {beginning_processor.total_matches_others}")
+        print(f"  Совпадения в остальных зонах: {beginning_processor.total_matches_others}")
         print(f"  Попадания с первого предсказания: {beginning_processor.total_first_prediction_hits}")
         print(f"  Байесовские попадания: {beginning_processor.total_bayesian_hits}")
         
-        print("\nСтатистика Inverse:")
+        print("\nInverse процессор:")
+        print(f"  Обработано Crumb'ов: {inverse_processor.total_crumbs}")
+        print(f"  Уникальных счетчиков: {len(inverse_processor.counters)}")
         print(f"  Совпадения в зоне актуализации: {inverse_processor.total_matches_actualization}")
-        print(f"  Совпадения в остальных: {inverse_processor.total_matches_others}")
+        print(f"  Совпадения в остальных зонах: {inverse_processor.total_matches_others}")
         print(f"  Попадания с первого предсказания: {inverse_processor.total_first_prediction_hits}")
         print(f"  Байесовские попадания: {inverse_processor.total_bayesian_hits}")
         
         # Вывод байесовской статистики
         print("\n" + "="*50)
+        print("БАЙЕСОВСКАЯ СТАТИСТИКА:")
+        print("="*50)
         beginning_processor.bayesian.print_stats()
         print()
         inverse_processor.bayesian.print_stats()
         
-        print(f"\n💾 Файлы сохранены:")
-        print(f"  Основные данные в '{OUTPUT_DIR}': begin.bin, inverse.bin")
-        print(f"  Статистика в '{STATS_DIR}': begin_matches.bin, inverse_matches.bin, begin_bayes.bin, inverse_bayes.bin")
+        # Общая статистика эффективности
+        print("\n" + "="*50)
+        print("ОБЩАЯ ЭФФЕКТИВНОСТЬ:")
+        print("="*50)
+        total_crumbs = beginning_processor.total_crumbs + inverse_processor.total_crumbs
+        total_bayesian_hits = beginning_processor.total_bayesian_hits + inverse_processor.total_bayesian_hits
+        
+        if total_crumbs > 0:
+            bayesian_efficiency = total_bayesian_hits / total_crumbs
+            print(f"Общая эффективность байесовских предсказаний: {bayesian_efficiency:.2%}")
+        
+        print(f"\n💾 ФАЙЛЫ СОХРАНЕНЫ:")
+        print(f"  Основные данные в '{OUTPUT_DIR}':")
+        print(f"    - begin.bin, inverse.bin")
+        print(f"  Статистика в '{STATS_DIR}':")
+        print(f"    - begin_matches.bin, inverse_matches.bin")
+        print(f"    - begin_bayes.bin, inverse_bayes.bin")
+        print(f"  Иерархические модели в '{HIERARCHICAL_DIR}':")
+        print(f"    - begin_groups.bin, inverse_groups.bin")
+        print(f"    - begin_context.bin, inverse_context.bin")
         
         # Запуск аудио модуля в конце
         run_audio_stream()
         
     except Exception as e:
         print(f"Ошибка при обработке файла: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
